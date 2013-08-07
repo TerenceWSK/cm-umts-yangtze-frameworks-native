@@ -13,7 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-
+#define LOG_NDEBUG 1    // Enable the log
 #define ATRACE_TAG ATRACE_TAG_GRAPHICS
 
 // Uncomment this to remove support for HWC_DEVICE_API_VERSION_0_3 and older
@@ -111,19 +111,23 @@ static size_t sizeofHwcLayerList(const hwc_composer_device_1_t* hwc,
 static int hwcEventControl(hwc_composer_device_1_t* hwc, int dpy,
         int event, int enabled) {
     if (hwcHasApiVersion(hwc, HWC_DEVICE_API_VERSION_1_0)) {
+        //ALOGW("%s: new version call [%d]", __func__, enabled);
         return hwc->eventControl(hwc, dpy, event, enabled);
     } else {
         hwc_composer_device_t* hwc0 = reinterpret_cast<hwc_composer_device_t*>(hwc);
+        //ALOGW("%s: old version call [%d]", __func__, enabled);
         return hwc0->methods->eventControl(hwc0, event, enabled);
     }
 }
 
 static int hwcBlank(hwc_composer_device_1_t* hwc, int dpy, int blank) {
     if (hwcHasApiVersion(hwc, HWC_DEVICE_API_VERSION_1_0)) {
+        //ALOGE("%s: calling hwc-blank", __func__);
         return hwc->blank(hwc, dpy, blank);
     } else {
         if (blank) {
             hwc_composer_device_t* hwc0 = reinterpret_cast<hwc_composer_device_t*>(hwc);
+            //ALOGE("%s: calling hwc-set", __func__);
             return hwc0->set(hwc0, NULL, NULL, NULL);
         } else {
             // HWC 0.x turns the screen on at the next set()
@@ -139,14 +143,21 @@ static int hwcPrepare(hwc_composer_device_1_t* hwc,
     } else {
         hwc_composer_device_t* hwc0 = reinterpret_cast<hwc_composer_device_t*>(hwc);
         hwc_layer_list_t* list0 = reinterpret_cast<hwc_layer_list_t*>(displays[0]);
+        // Force "list0->numHwLayers = 0" will let all layers to be composed by SF.
+        // The HWC of "umts_yangtze" seems only capable of compose 2 layers. More layers
+        // will kill the HWC. -- Gopise
+        list0->numHwLayers = 0; //list0->numHwLayers > 2 ? 0 : list0->numHwLayers;
+
+        //ALOGD("%s: calling hwc0->prepare(0x%x, 0x%x, %d))", __func__, hwc0, list0, list0->numHwLayers);
         // In the past, SurfaceFlinger would pass a NULL list when doing full
         // OpenGL ES composition. I don't know what, if any, dependencies there
         // are on this behavior, so I'm playing it safe and preserving it.
         // ... and I'm removing it. NULL layers kill the Tegra compositor (RC, Nov 2012)
-        /*if (list0->numHwLayers == 0)
+        if (list0->numHwLayers == 0)
             return hwc0->prepare(hwc0, NULL);
-        else*/
+        else
             return hwc0->prepare(hwc0, list0);
+        //ALOGD("%s: calling hwc0->prepare(0x%x, 0x%x))", __func__, hwc0, list0);
     }
 }
 static int hwcSet(hwc_composer_device_1_t* hwc, EGLDisplay dpy, EGLSurface sur,
@@ -248,6 +259,8 @@ HWComposer::HWComposer(
         abort();
     }
 
+    ALOGE("FB info: width: %d, height: %d, xdpi: %d, ydpi: %d, HWC=0x%x, FBdev=0x%x",mFbDev->width,mFbDev->height,mFbDev->xdpi,mFbDev->ydpi, mHwc, mFbDev);
+
     // these display IDs are always reserved
     for (size_t i=0 ; i<HWC_NUM_DISPLAY_TYPES ; i++) {
         mAllocatedDisplayIDs.markBit(i);
@@ -306,15 +319,19 @@ HWComposer::HWComposer(
     if (mFbDev) {
         ALOG_ASSERT(!(mHwc && hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_1)),
                 "should only have fbdev if no hwc or hwc is 1.0");
+        ALOGE("Going with FB path, hacking the height...");
 
         DisplayData& disp(mDisplayData[HWC_DISPLAY_PRIMARY]);
         disp.connected = true;
         disp.width = mFbDev->width;
-        disp.height = mFbDev->height;
+        disp.height = mFbDev->height > 960 ? 960: mFbDev->height;   // Hacking the height
         disp.format = mFbDev->format;
         disp.xdpi = mFbDev->xdpi;
         disp.ydpi = mFbDev->ydpi;
+
         if (disp.refresh == 0) {
+            //ALOGE("%s, hacking fps...", __func__);
+            //disp.refresh = nsecs_t(1e9 / 55);
             disp.refresh = nsecs_t(1e9 / mFbDev->fps);
             ALOGW("getting VSYNC period from fb HAL: %lld", disp.refresh);
         }
@@ -323,7 +340,10 @@ HWComposer::HWComposer(
             ALOGW("getting VSYNC period from thin air: %lld",
                     mDisplayData[HWC_DISPLAY_PRIMARY].refresh);
         }
+        ALOGE("Display info[%d]: width: %d, height: %d",HWC_DISPLAY_PRIMARY,disp.width,disp.height);
+
     } else if (mHwc) {
+        ALOGE("Going with HWC path, hacking the height...");
         // here we're guaranteed to have at least HWC 1.1
         for (size_t i =0 ; i<HWC_NUM_DISPLAY_TYPES ; i++) {
             queryDisplayProperties(i);
@@ -491,13 +511,13 @@ status_t HWComposer::queryDisplayProperties(int disp) {
             mDisplayData[disp].width = values[i];
             break;
         case HWC_DISPLAY_HEIGHT:
-            mDisplayData[disp].height = values[i];
+            mDisplayData[disp].height = values[i] > 960 ? 960 : values[i];    // Hacking the height
             break;
         case HWC_DISPLAY_DPI_X:
             mDisplayData[disp].xdpi = values[i] / 1000.0f;
             break;
         case HWC_DISPLAY_DPI_Y:
-            mDisplayData[disp].ydpi = values[i] / 1000.0f;
+            mDisplayData[disp].ydpi = (values[i] > 960 ? 960 : values[i]) / 1000.0f;    // Hacking the height dpi
             break;
         default:
             ALOG_ASSERT(false, "unknown display attribute[%d] %#x",
@@ -505,6 +525,8 @@ status_t HWComposer::queryDisplayProperties(int disp) {
             break;
         }
     }
+    
+    ALOGE("HWC display info[%d]: width=%d, height=%d",disp, mDisplayData[disp].width,  mDisplayData[disp].height);
 
     // FIXME: what should we set the format to?
     mDisplayData[disp].format = HAL_PIXEL_FORMAT_RGBA_8888;
@@ -581,6 +603,7 @@ bool HWComposer::isConnected(int disp) const {
 }
 
 void HWComposer::eventControl(int disp, int event, int enabled) {
+    //ALOGW("%s: disp=%d, event=%d, enabled=%d", __func__, disp, event, enabled);
     if (uint32_t(disp)>31 || !mAllocatedDisplayIDs.hasBit(disp)) {
         ALOGD("eventControl ignoring event %d on unallocated disp %d (en=%d)",
               event, disp, enabled);
@@ -592,6 +615,7 @@ void HWComposer::eventControl(int disp, int event, int enabled) {
         return;
     }
     status_t err = NO_ERROR;
+    //ALOGW("%s: mHwc=0x%x, mDebugForceFakeVSync=%d, hwcHasVsyncEvent=%d",__func__, mHwc, mDebugForceFakeVSync, hwcHasVsyncEvent(mHwc)?1:0);
     if (mHwc && !mDebugForceFakeVSync && hwcHasVsyncEvent(mHwc))  {
         if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_0)) {
             // NOTE: we use our own internal lock here because we have to call
@@ -599,11 +623,13 @@ void HWComposer::eventControl(int disp, int event, int enabled) {
             // that even if HWC blocks (which it shouldn't), it won't
             // affect other threads.
             Mutex::Autolock _l(mEventControlLock);
+            //ALOGW("%s: new calling", __func__);
             const int32_t eventBit = 1UL << event;
             const int32_t newValue = enabled ? eventBit : 0;
             const int32_t oldValue = mDisplayData[disp].events & eventBit;
             if (newValue != oldValue) {
                 ATRACE_CALL();
+                //ALOGW("%s: calling hwc to enable/disable vsync", __func__);
                 err = hwcEventControl(mHwc, disp, event, enabled);
                 if (!err) {
                     int32_t& events(mDisplayData[disp].events);
@@ -611,6 +637,7 @@ void HWComposer::eventControl(int disp, int event, int enabled) {
                 }
             }
         } else {
+            //ALOGW("%s: legacy calling",__func__);
             err = hwcEventControl(mHwc, disp, event, enabled);
         }
         // error here should not happen -- not sure what we should
@@ -619,6 +646,7 @@ void HWComposer::eventControl(int disp, int event, int enabled) {
                 event, enabled, strerror(-err));
     }
 
+    //ALOGW("%s: exit with: err=%d", __func__, err);
     if (err == NO_ERROR && mVSyncThread != NULL) {
         mVSyncThread->setEnabled(enabled);
     }
@@ -729,6 +757,7 @@ status_t HWComposer::prepare() {
     }
     int err = hwcPrepare(mHwc, mNumDisplays, mLists);
     ALOGE_IF(err, "HWComposer: prepare failed (%s)", strerror(-err));
+    //ALOGE("%s: finished prepare", __func__);
 
     if (err == NO_ERROR) {
         if (hwcHasApiVersion(mHwc, HWC_DEVICE_API_VERSION_1_0)) {
@@ -865,6 +894,7 @@ status_t HWComposer::release(int disp) {
 status_t HWComposer::acquire(int disp) {
     LOG_FATAL_IF(disp >= HWC_NUM_DISPLAY_TYPES);
     if (mHwc) {
+        //ALOGE("%s: calling into hwcBlank...", __func__);
         return (status_t)hwcBlank(mHwc, disp, 0);
     }
     return NO_ERROR;
